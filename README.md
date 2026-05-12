@@ -140,4 +140,3 @@ Flash Mode: DIO
 Flash Size: 4MB
 Partition Scheme: Default 4MB with spiffs
 PSRAM: Disabled
-Optional Improvement
