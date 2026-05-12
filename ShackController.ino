@@ -4,6 +4,7 @@
 #include <TFT_eSPI.h>
 #include <XPT2046_Touchscreen.h>
 #include <SPI.h>
+#include <Preferences.h>
 
 using namespace websockets;
 
