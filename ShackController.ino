@@ -49,6 +49,7 @@ SPIClass touchSPI = SPIClass(VSPI);
 XPT2046_Touchscreen touch(TOUCH_CS, TOUCH_IRQ);
 
 WebsocketsClient wsClient;
+Preferences prefs;
 
 // =====================================================
 // App State
@@ -61,6 +62,13 @@ String buttonNames[4] = {
   "Antenna 4"
 };
 
+String lastDrawnButtonNames[4] = {
+  "",
+  "",
+  "",
+  ""
+};
+
 bool buttonStates[4] = {
   false,
   false,
@@ -68,14 +76,42 @@ bool buttonStates[4] = {
   false
 };
 
+bool lastDrawnButtonStates[4] = {
+  true,
+  true,
+  true,
+  true
+};
+
 bool wifiConnected = false;
 bool websocketConnected = false;
 
+bool lastDrawnWifiConnected = false;
+bool lastDrawnWebsocketConnected = false;
+
+bool darkTheme = true;
+bool lastDrawnDarkTheme = false;
+
 unsigned long lastReconnectAttempt = 0;
 unsigned long lastTouchTime = 0;
-unsigned long lastStatusBlink = 0;
+unsigned long lastFooterUpdate = 0;
 
-bool statusBlink = false;
+// =====================================================
+// Colors
+// =====================================================
+
+uint16_t colorBackground;
+uint16_t colorHeader;
+uint16_t colorHeaderText;
+uint16_t colorText;
+uint16_t colorSubText;
+uint16_t colorBorder;
+uint16_t colorButtonOn;
+uint16_t colorButtonOff;
+uint16_t colorButtonText;
+uint16_t colorFooterBg;
+uint16_t colorThemeButton;
+uint16_t colorThemeButtonText;
 
 // =====================================================
 // Button Layout - 320x240 Landscape
@@ -88,29 +124,20 @@ struct ButtonArea {
   int h;
 };
 
-ButtonArea buttons[4] = {
-  {  15,  55, 140, 70 },
-  { 165,  55, 140, 70 },
-  {  15, 145, 140, 70 },
-  { 165, 145, 140, 70 }
+ButtonArea antennaButtons[4] = {
+  {  15,  52, 140, 68 },
+  { 165,  52, 140, 68 },
+  {  15, 136, 140, 68 },
+  { 165, 136, 140, 68 }
 };
 
+ButtonArea themeButton = { 210, 210, 110, 30 };
 // =====================================================
 // Utility
 // =====================================================
 
 String getWebSocketURL() {
   return "ws://" + String(SWITCH_HOST) + ":" + String(SWITCH_PORT) + "/ws";
-}
-
-void clearSerialBootNoise() {
-  Serial.println();
-  Serial.println("========================================");
-  Serial.println("CYD ANTENNA SWITCH CONTROLLER");
-  Serial.println("ESP32-2432S028");
-  Serial.println("Display: ST7789 via TFT_eSPI");
-  Serial.println("Touch: XPT2046 calibrated");
-  Serial.println("========================================");
 }
 
 String trimLabel(String label, int maxLen) {
@@ -123,75 +150,197 @@ String trimLabel(String label, int maxLen) {
   return label.substring(0, maxLen);
 }
 
+void applyThemeColors() {
+  if (darkTheme) {
+    colorBackground = TFT_BLACK;
+    colorHeader = TFT_NAVY;
+    colorHeaderText = TFT_WHITE;
+    colorText = TFT_WHITE;
+    colorSubText = TFT_DARKGREY;
+    colorBorder = TFT_WHITE;
+    colorButtonOn = TFT_GREEN;
+    colorButtonOff = TFT_RED;
+    colorButtonText = TFT_WHITE;
+    colorFooterBg = TFT_BLACK;
+    colorThemeButton = TFT_DARKGREY;
+    colorThemeButtonText = TFT_WHITE;
+  } else {
+    colorBackground = TFT_WHITE;
+    colorHeader = TFT_BLUE;
+    colorHeaderText = TFT_WHITE;
+    colorText = TFT_BLACK;
+    colorSubText = TFT_DARKGREY;
+    colorBorder = TFT_BLACK;
+    colorButtonOn = TFT_GREEN;
+    colorButtonOff = TFT_RED;
+    colorButtonText = TFT_WHITE;
+    colorFooterBg = TFT_WHITE;
+    colorThemeButton = TFT_LIGHTGREY;
+    colorThemeButtonText = TFT_BLACK;
+  }
+}
+
+void forceFullRedrawMarkers() {
+  for (int i = 0; i < 4; i++) {
+    lastDrawnButtonNames[i] = "";
+    lastDrawnButtonStates[i] = !buttonStates[i];
+  }
+
+  lastDrawnWifiConnected = !wifiConnected;
+  lastDrawnWebsocketConnected = !websocketConnected;
+  lastDrawnDarkTheme = !darkTheme;
+}
+
 // =====================================================
 // Display Functions
 // =====================================================
 
-void drawHeader() {
-  tft.fillRect(0, 0, 320, 42, TFT_NAVY);
+void drawBootScreen(const char* message1, const char* message2 = "") {
+  applyThemeColors();
 
-  tft.setTextColor(TFT_WHITE, TFT_NAVY);
+  tft.fillScreen(colorBackground);
+
+  tft.setTextColor(colorText, colorBackground);
   tft.setTextSize(2);
-  tft.setCursor(10, 8);
-  tft.print("Shack Controller");
+
+  tft.setCursor(20, 70);
+  tft.print(message1);
+
+  if (strlen(message2) > 0) {
+    tft.setTextSize(1);
+    tft.setCursor(20, 110);
+    tft.print(message2);
+  }
+}
+
+void drawThemeButton() {
+  tft.fillRoundRect(
+    themeButton.x,
+    themeButton.y,
+    themeButton.w,
+    themeButton.h,
+    6,
+    colorThemeButton
+  );
+
+  tft.drawRoundRect(
+    themeButton.x,
+    themeButton.y,
+    themeButton.w,
+    themeButton.h,
+    6,
+    colorBorder
+  );
+
+  tft.setTextColor(colorThemeButtonText, colorThemeButton);
+  tft.setTextSize(1);
+
+  String label = darkTheme ? "LIGHT MODE" : "DARK MODE";
+  int textWidth = label.length() * 6;
+  int textX = themeButton.x + ((themeButton.w - textWidth) / 2);
+  int textY = themeButton.y + 7;
+
+  tft.setCursor(textX, textY);
+  tft.print(label);
+}
+
+void drawHeader(bool force = false) {
+  if (!force &&
+      lastDrawnWifiConnected == wifiConnected &&
+      lastDrawnWebsocketConnected == websocketConnected &&
+      lastDrawnDarkTheme == darkTheme) {
+    return;
+  }
+
+  tft.fillRect(0, 0, 320, 42, colorHeader);
+
+  tft.setTextColor(colorHeaderText, colorHeader);
+  tft.setTextSize(2);
+  tft.setCursor(8, 7);
+  tft.print("Shack Ctrl");
 
   tft.setTextSize(1);
-  tft.setCursor(230, 8);
+  tft.setCursor(8, 29);
 
   if (wifiConnected && websocketConnected) {
-    tft.setTextColor(TFT_GREEN, TFT_NAVY);
+    tft.setTextColor(TFT_GREEN, colorHeader);
     tft.print("ONLINE");
   } else if (wifiConnected && !websocketConnected) {
-    tft.setTextColor(TFT_YELLOW, TFT_NAVY);
-    tft.print("NO WS");
+    tft.setTextColor(TFT_YELLOW, colorHeader);
+    tft.print("NO WEBSOCKET");
   } else {
-    tft.setTextColor(TFT_RED, TFT_NAVY);
+    tft.setTextColor(TFT_RED, colorHeader);
     tft.print("NO WIFI");
   }
 
-  tft.setTextColor(TFT_WHITE, TFT_NAVY);
-  tft.setCursor(230, 23);
-  tft.print(WiFi.localIP());
+  tft.setTextColor(colorHeaderText, colorHeader);
+  tft.setCursor(95, 29);
+
+  if (wifiConnected) {
+    tft.print(WiFi.localIP());
+  } else {
+    tft.print("Disconnected");
+  }
+
+  lastDrawnWifiConnected = wifiConnected;
+  lastDrawnWebsocketConnected = websocketConnected;
+  lastDrawnDarkTheme = darkTheme;
 }
 
-void drawFooter() {
-  tft.fillRect(0, 222, 320, 18, TFT_BLACK);
+void drawFooter(bool force = false) {
+  if (!force && millis() - lastFooterUpdate < 1000) {
+    return;
+  }
+
+  lastFooterUpdate = millis();
+
+  tft.fillRect(0, 210, 320, 30, colorFooterBg);
 
   tft.setTextSize(1);
 
   if (wifiConnected && websocketConnected) {
-    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    tft.setCursor(8, 228);
-    tft.print("Synced with antenna switch");
+    tft.setTextColor(colorSubText, colorFooterBg);
+    tft.setCursor(8, 222);
+    tft.print("Synced");
   } else if (wifiConnected) {
-    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    tft.setCursor(8, 228);
-    tft.print("Trying WebSocket reconnect...");
+    tft.setTextColor(TFT_YELLOW, colorFooterBg);
+    tft.setCursor(8, 222);
+    tft.print("WS reconnect...");
   } else {
-    tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.setCursor(8, 228);
-    tft.print("Trying Wi-Fi reconnect...");
+    tft.setTextColor(TFT_RED, colorFooterBg);
+    tft.setCursor(8, 222);
+    tft.print("WiFi reconnect...");
   }
+
+  drawThemeButton();
 }
 
-void drawButton(int index) {
-  ButtonArea b = buttons[index];
+void drawButton(int index, bool force = false) {
+  if (index < 0 || index > 3) {
+    return;
+  }
 
-  uint16_t fillColor = buttonStates[index] ? TFT_GREEN : TFT_RED;
-  uint16_t borderColor = TFT_WHITE;
-  uint16_t textColor = TFT_WHITE;
+  if (!force &&
+      lastDrawnButtonNames[index] == buttonNames[index] &&
+      lastDrawnButtonStates[index] == buttonStates[index]) {
+    return;
+  }
+
+  ButtonArea b = antennaButtons[index];
+
+  uint16_t fillColor = buttonStates[index] ? colorButtonOn : colorButtonOff;
 
   tft.fillRoundRect(b.x, b.y, b.w, b.h, 10, fillColor);
-  tft.drawRoundRect(b.x, b.y, b.w, b.h, 10, borderColor);
+  tft.drawRoundRect(b.x, b.y, b.w, b.h, 10, colorBorder);
 
   String label = trimLabel(buttonNames[index], 12);
 
-  tft.setTextColor(textColor, fillColor);
+  tft.setTextColor(colorButtonText, fillColor);
   tft.setTextSize(2);
 
   int textWidth = label.length() * 12;
   int textX = b.x + ((b.w - textWidth) / 2);
-  int textY = b.y + 16;
+  int textY = b.y + 15;
 
   if (textX < b.x + 5) {
     textX = b.x + 5;
@@ -206,46 +355,77 @@ void drawButton(int index) {
   int statusWidth = statusText.length() * 6;
   int statusX = b.x + ((b.w - statusWidth) / 2);
 
-  tft.setCursor(statusX, b.y + 50);
+  tft.setCursor(statusX, b.y + 49);
   tft.print(statusText);
+
+  lastDrawnButtonNames[index] = buttonNames[index];
+  lastDrawnButtonStates[index] = buttonStates[index];
 }
 
-void drawMainUI() {
-  tft.fillScreen(TFT_BLACK);
-  drawHeader();
+void drawStaticBackground() {
+  applyThemeColors();
+
+  tft.fillScreen(colorBackground);
+
+  drawHeader(true);
 
   for (int i = 0; i < 4; i++) {
-    drawButton(i);
+    drawButton(i, true);
   }
 
-  drawFooter();
+  drawFooter(true);
 }
 
-void drawBootScreen(const char* message1, const char* message2 = "") {
-  tft.fillScreen(TFT_BLACK);
+void updateChangedUI() {
+  drawHeader(false);
 
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextSize(2);
-
-  tft.setCursor(20, 70);
-  tft.print(message1);
-
-  if (strlen(message2) > 0) {
-    tft.setTextSize(1);
-    tft.setCursor(20, 110);
-    tft.print(message2);
+  for (int i = 0; i < 4; i++) {
+    drawButton(i, false);
   }
+
+  drawFooter(false);
 }
 
-void drawTouchFlash(int index) {
+void flashButtonBorder(int index) {
   if (index < 0 || index > 3) {
     return;
   }
 
-  ButtonArea b = buttons[index];
+  ButtonArea b = antennaButtons[index];
+
   tft.drawRoundRect(b.x - 2, b.y - 2, b.w + 4, b.h + 4, 12, TFT_YELLOW);
+  delay(60);
+  tft.drawRoundRect(b.x - 2, b.y - 2, b.w + 4, b.h + 4, 12, colorBackground);
+  drawButton(index, true);
+}
+
+void flashThemeButton() {
+  tft.drawRoundRect(
+    themeButton.x - 2,
+    themeButton.y - 2,
+    themeButton.w + 4,
+    themeButton.h + 4,
+    8,
+    TFT_YELLOW
+  );
   delay(80);
-  drawButton(index);
+}
+
+void toggleTheme() {
+  Serial.println("Theme button detected");
+  Serial.println("Toggling theme...");
+
+  flashThemeButton();
+
+  darkTheme = !darkTheme;
+  prefs.putBool("darkTheme", darkTheme);
+
+  Serial.print("New theme: ");
+  Serial.println(darkTheme ? "DARK" : "LIGHT");
+
+  applyThemeColors();
+  forceFullRedrawMarkers();
+  drawStaticBackground();
 }
 
 // =====================================================
@@ -268,14 +448,16 @@ bool getTouchXY(int &screenX, int &screenY) {
   return true;
 }
 
-int getTouchedButton(int x, int y) {
-  for (int i = 0; i < 4; i++) {
-    ButtonArea b = buttons[i];
+bool pointInArea(int x, int y, ButtonArea area) {
+  return x >= area.x &&
+         x <= area.x + area.w &&
+         y >= area.y &&
+         y <= area.y + area.h;
+}
 
-    if (x >= b.x &&
-        x <= b.x + b.w &&
-        y >= b.y &&
-        y <= b.y + b.h) {
+int getTouchedAntennaButton(int x, int y) {
+  for (int i = 0; i < 4; i++) {
+    if (pointInArea(x, y, antennaButtons[i])) {
       return i;
     }
   }
@@ -300,12 +482,19 @@ void parseSwitchUpdate(String payload) {
     return;
   }
 
+  bool changed = false;
+
   if (doc.containsKey("states")) {
     JsonArray states = doc["states"].as<JsonArray>();
 
     for (int i = 0; i < 4; i++) {
       if (!states[i].isNull()) {
-        buttonStates[i] = states[i].as<bool>();
+        bool newState = states[i].as<bool>();
+
+        if (buttonStates[i] != newState) {
+          buttonStates[i] = newState;
+          changed = true;
+        }
       }
     }
   }
@@ -315,18 +504,25 @@ void parseSwitchUpdate(String payload) {
 
     for (int i = 0; i < 4; i++) {
       if (!names[i].isNull()) {
-        buttonNames[i] = names[i].as<String>();
+        String newName = names[i].as<String>();
+
+        if (buttonNames[i] != newName) {
+          buttonNames[i] = newName;
+          changed = true;
+        }
       }
     }
   }
 
-  drawMainUI();
+  if (changed) {
+    updateChangedUI();
+  }
 }
 
 void sendToggleCommand(int id) {
   if (!websocketConnected) {
     Serial.println("Cannot toggle: WebSocket not connected");
-    drawFooter();
+    drawFooter(true);
     return;
   }
 
@@ -350,23 +546,26 @@ void sendToggleCommand(int id) {
 void connectWebSocket() {
   if (WiFi.status() != WL_CONNECTED) {
     websocketConnected = false;
+    updateChangedUI();
     return;
   }
 
-  String url = getWebSocketURL();
+  String url = "ws://" + String(SWITCH_HOST) + ":" + String(SWITCH_PORT) + "/ws";
 
   Serial.print("Connecting WebSocket: ");
   Serial.println(url);
 
-  websocketConnected = wsClient.connect(url);
+  bool result = wsClient.connect(url);
 
-  if (websocketConnected) {
+  if (result) {
+    websocketConnected = true;
     Serial.println("WebSocket connected");
   } else {
+    websocketConnected = false;
     Serial.println("WebSocket connection failed");
   }
 
-  drawMainUI();
+  updateChangedUI();
 }
 
 // =====================================================
@@ -399,13 +598,13 @@ void connectWiFi() {
     Serial.println(WiFi.localIP());
 
     drawBootScreen("WiFi Connected", WiFi.localIP().toString().c_str());
-    delay(800);
+    delay(700);
   } else {
     wifiConnected = false;
 
     Serial.println("WiFi connection failed");
     drawBootScreen("WiFi Failed", "Will retry automatically");
-    delay(1000);
+    delay(900);
   }
 }
 
@@ -417,7 +616,18 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  clearSerialBootNoise();
+  Serial.println();
+  Serial.println("========================================");
+  Serial.println("CYD SHACK CONTROLLER");
+  Serial.println("ESP32-2432S028");
+  Serial.println("Display: ST7789 via TFT_eSPI");
+  Serial.println("Touch: XPT2046 calibrated");
+  Serial.println("Theme: saved in Preferences");
+  Serial.println("========================================");
+
+  prefs.begin("shackctrl", false);
+  darkTheme = prefs.getBool("darkTheme", true);
+  applyThemeColors();
 
   pinMode(TFT_BACKLIGHT_PIN, OUTPUT);
   digitalWrite(TFT_BACKLIGHT_PIN, HIGH);
@@ -430,7 +640,7 @@ void setup() {
   touch.setRotation(1);
 
   drawBootScreen("CYD Starting...", "Display and touch OK");
-  delay(800);
+  delay(700);
 
   wsClient.onMessage([](WebsocketsMessage message) {
     parseSwitchUpdate(message.data());
@@ -440,13 +650,13 @@ void setup() {
     if (event == WebsocketsEvent::ConnectionOpened) {
       Serial.println("WebSocket event: opened");
       websocketConnected = true;
-      drawMainUI();
+      updateChangedUI();
     }
 
     if (event == WebsocketsEvent::ConnectionClosed) {
       Serial.println("WebSocket event: closed");
       websocketConnected = false;
-      drawMainUI();
+      updateChangedUI();
     }
 
     if (event == WebsocketsEvent::GotPing) {
@@ -460,10 +670,11 @@ void setup() {
 
   connectWiFi();
 
+  forceFullRedrawMarkers();
+  drawStaticBackground();
+
   if (wifiConnected) {
     connectWebSocket();
-  } else {
-    drawMainUI();
   }
 }
 
@@ -475,18 +686,20 @@ void loop() {
   if (WiFi.status() == WL_CONNECTED) {
     if (!wifiConnected) {
       wifiConnected = true;
-      drawMainUI();
+      updateChangedUI();
     }
   } else {
     if (wifiConnected) {
       wifiConnected = false;
       websocketConnected = false;
-      drawMainUI();
+      updateChangedUI();
     }
 
     if (millis() - lastReconnectAttempt > 5000) {
       lastReconnectAttempt = millis();
       connectWiFi();
+      forceFullRedrawMarkers();
+      drawStaticBackground();
     }
 
     delay(50);
@@ -506,25 +719,36 @@ void loop() {
   int y;
 
   if (getTouchXY(x, y)) {
-    if (millis() - lastTouchTime > 500) {
+    if (millis() - lastTouchTime > 450) {
       lastTouchTime = millis();
 
-      int buttonIndex = getTouchedButton(x, y);
+      Serial.print("Touch detected at X=");
+      Serial.print(x);
+      Serial.print(" Y=");
+      Serial.println(y);
+
+      if (pointInArea(x, y, themeButton)) {
+        toggleTheme();
+        return;
+      }
+
+      int buttonIndex = getTouchedAntennaButton(x, y);
 
       if (buttonIndex >= 0) {
-        Serial.print("Touched button ");
+        Serial.print("Touched antenna button ");
         Serial.println(buttonIndex);
 
-        drawTouchFlash(buttonIndex);
+        flashButtonBorder(buttonIndex);
         sendToggleCommand(buttonIndex);
+      } else {
+        Serial.println("Touch did not hit any button");
       }
     }
   }
 
-  if (millis() - lastStatusBlink > 1000) {
-    lastStatusBlink = millis();
-    statusBlink = !statusBlink;
-  }
+  updateChangedUI();
 
   delay(10);
 }
+
+
