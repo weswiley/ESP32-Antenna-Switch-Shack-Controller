@@ -19,9 +19,7 @@ This project turns the CYD into a dedicated Wi-Fi touchscreen controller that mi
 ## Hardware
 
 ### Controller
-- ESP32-2432S028 (Cheap Yellow Display / CYD)
-- ST7789 TFT display (integrated)
-- XPT2046 touch controller (integrated)
+- ESP32-2432S028 (Cheap Yellow Display / CYD) https://amzn.to/4fk3qLb
 
 ### Controlled Device
 This project is designed to work with:
